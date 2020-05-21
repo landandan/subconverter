@@ -276,6 +276,14 @@ DOMAIN-SUFFIX,westlaw.com
 DOMAIN-SUFFIX,wiley.com
 DOMAIN-SUFFIX,worldbank.org
 DOMAIN-SUFFIX,worldscientific.com
+# > Cpic
+DOMAIN-SUFFIX,code.hq.cpic.com
+DOMAIN-SUFFIX,cicd.hq.cpic.com
+# > TencentCloud
+DOMAIN-SUFFIX,msstatic.com
+# > 120问
+DOMAIN-SUFFIX,120ask.com
+DOMAIN-SUFFIX,120askimages.com
 # > Other
 DOMAIN-SUFFIX,cn
 DOMAIN-SUFFIX,360in.com
