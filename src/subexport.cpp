@@ -460,10 +460,10 @@ bool matchRange(std::string &range, int target)
     return match;
 }
 
-std::string nodeRename(std::string remark, int groupID, const string_array &rename_array)
+std::string nodeRename(const std::string &orig_remark, int groupID, const string_array &rename_array)
 {
     string_array vArray;
-    std::string targetRange;
+    std::string targetRange, remark = orig_remark;
     string_size pos;
 
     for(const std::string &x : rename_array)
@@ -490,12 +490,15 @@ std::string nodeRename(std::string remark, int groupID, const string_array &rena
         if(matchRange(targetRange, groupID))
             remark = regReplace(remark, vArray[0], vArray[1]);
     }
+    if(remark.empty())
+        return orig_remark;
     return remark;
 }
 
-std::string removeEmoji(std::string remark)
+std::string removeEmoji(const std::string &orig_remark)
 {
     char emoji_id[2] = {(char)-16, (char)-97};
+    std::string remark = orig_remark;
     while(true)
     {
         if(remark[0] == emoji_id[0] && remark[1] == emoji_id[1])
@@ -503,6 +506,8 @@ std::string removeEmoji(std::string remark)
         else
             break;
     }
+    if(remark.empty())
+        return orig_remark;
     return remark;
 }
 
@@ -604,7 +609,7 @@ void rulesetToClash(YAML::Node &base_rule, std::vector<ruleset_content> &ruleset
             */
             if(lineSize)
             {
-                strLine = regTrim(strLine);
+                strLine = trim(trim_of(strLine, '\r'));
                 lineSize = strLine.size();
             }
             if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
@@ -688,7 +693,7 @@ std::string rulesetToClashStr(YAML::Node &base_rule, std::vector<ruleset_content
             lineSize = strLine.size();
             if(lineSize)
             {
-                strLine = regTrim(strLine);
+                strLine = trim(trim_of(strLine, '\r'));
                 lineSize = strLine.size();
             }
             if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
@@ -846,7 +851,7 @@ void rulesetToSurge(INIReader &base_rule, std::vector<ruleset_content> &ruleset_
                 */
                 if(lineSize)
                 {
-                    strLine = regTrim(strLine);
+                    strLine = trim(trim_of(strLine, '\r'));
                     lineSize = strLine.size();
                 }
                 if(!lineSize || strLine[0] == ';' || strLine[0] == '#' || (lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')) //empty lines and comments are ignored
@@ -1448,12 +1453,20 @@ std::string netchToSurge(std::vector<nodeInfo> &nodes, std::string &base_conf, s
             local_port++;
             break;
         case SPEEDTEST_MESSAGE_FOUNDSOCKS:
-            proxy = "socks5, " + hostname + ", " + port + ", " + username + ", " + password;
+            proxy = "socks5, " + hostname + ", " + port;
+            if(username.size())
+                proxy += ", username=" + username;
+            if(password.size())
+                proxy += ", password=" + password;
             if(scv)
                 proxy += ", skip-cert-verify=1";
             break;
         case SPEEDTEST_MESSAGE_FOUNDHTTP:
-            proxy = "http, " + hostname + ", " + port + ", " + username + ", " + password;
+            proxy = "http, " + hostname + ", " + port;
+            if(username.size())
+                proxy += ", username=" + username;
+            if(password.size())
+                proxy += ", password=" + password;
             proxy += std::string(", tls=") + (type == "HTTPS" ? "true" : "false");
             if(scv)
                 proxy += ", skip-cert-verify=1";
@@ -1610,7 +1623,7 @@ std::string netchToSS(std::vector<nodeInfo> &nodes, extra_settings &ext)
             proxyStr = "ss://" + urlsafe_base64_encode(method + ":" + password) + "@" + hostname + ":" + port;
             if(plugin.size() && pluginopts.size())
             {
-                proxyStr += "/?plugin=" + UrlEncode(plugin + ";" +pluginopts);
+                proxyStr += "/?plugin=" + UrlEncode(plugin + ";" + pluginopts);
             }
             proxyStr += "#" + UrlEncode(remark);
             break;
@@ -2098,6 +2111,7 @@ std::string netchToQuanX(std::vector<nodeInfo> &nodes, std::string &base_conf, s
     ini.AddDirectSaveSection("rewrite_local");
     ini.AddDirectSaveSection("task_local");
     ini.AddDirectSaveSection("mitm");
+    ini.AddDirectSaveSection("server_remote");
     if(!ext.nodelist && ini.Parse(base_conf) != 0)
         return std::string();
 
