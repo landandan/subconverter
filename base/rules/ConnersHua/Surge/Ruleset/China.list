@@ -399,6 +399,7 @@ DOMAIN-SUFFIX,note.youdao.com
 DOMAIN,download.jetbrains.com
 DOMAIN,images-cn.ssl-images-amazon.com
 DOMAIN,cdn.angruo.com
+IP-CIDR,58.246.0.0/18,no-resolve
 
 # DNSPod Public DNS+
 IP-CIDR,119.28.28.28/32,no-resolve
