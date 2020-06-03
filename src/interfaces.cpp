@@ -19,8 +19,7 @@
 #include "string_hash.h"
 #include "templates.h"
 #include "upload.h"
-
-#define MAX_EXTCONF_RULESET_COUNT 64
+#include "script_duktape.h"
 
 //common settings
 std::string pref_path = "pref.ini", def_ext_config;
@@ -55,6 +54,7 @@ bool do_sort = false, config_update_strict = false;
 bool clash_use_new_field_name = false;
 std::string proxy_config, proxy_ruleset, proxy_subscription;
 int config_update_interval = 0;
+std::string sort_script, filter_script;
 
 std::string clash_rule_base;
 string_array clash_extra_group;
@@ -69,6 +69,9 @@ INIReader surge_base, mellow_base;
 bool serve_cache_on_fetch_fail = false;
 int cache_subscription = 60, cache_config = 300, cache_ruleset = 21600;
 
+//limits
+size_t max_allowed_rulesets = 64, max_allowed_rules = 32768;
+
 string_array regex_blacklist = {"(.*)*"};
 
 template <typename T> void operator >> (const YAML::Node& node, T& i)
@@ -82,6 +85,11 @@ template <typename T> T safe_as (const YAML::Node& node)
     if(node.IsDefined() && !node.IsNull())
         return node.as<T>();
     return T();
+};
+
+template <typename T> void operator >>= (const YAML::Node& node, T& i)
+{
+    i = safe_as<T>(node);
 };
 
 std::string parseProxy(const std::string &source)
@@ -157,7 +165,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
             switch(hash_(vArray[0]))
             {
             case "DOMAIN-SUFFIX"_hash:
-                strLine = "  - '." + vArray[1] + "'\n  - '" + vArray[1] + "'";
+                strLine = "  - '+." + vArray[1] + "'";
                 break;
             case "DOMAIN"_hash:
                 strLine = "  - '" + vArray[1] + "'";
@@ -217,8 +225,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                     strLine = regReplace(strLine, rule_match_regex, "$1$3");
             }
         }
-
-        output_content.append(strLine + "\n");
+        output_content += strLine + "\n";
     }
 
     if(type_int == 3 && output_content == "payload:\n")
@@ -516,6 +523,9 @@ void readYAMLConf(YAML::Node &node)
         section["exclude_remarks"] >> def_exclude_remarks;
     if(section["include_remarks"].IsSequence())
         section["include_remarks"] >> def_include_remarks;
+    filter_script = safe_as<bool>(section["enable_filter"]) ? safe_as<std::string>(section["filter_script"]) : "";
+    if(startsWith(filter_script, "path:"))
+        filter_script = fileGet(filter_script.substr(5), false);
     section["base_path"] >> base_path;
     section["clash_rule_base"] >> clash_rule_base;
     section["surge_rule_base"] >> surge_rule_base;
@@ -561,6 +571,7 @@ void readYAMLConf(YAML::Node &node)
         tfo_flag.set(safe_as<std::string>(section["tcp_fast_open_flag"]));
         scv_flag.set(safe_as<std::string>(section["skip_cert_verify_flag"]));
         section["sort_flag"] >> do_sort;
+        section["sort_script"] >> sort_script;
         section["filter_deprecated_nodes"] >> filter_deprecated;
         section["append_sub_userinfo"] >> append_userinfo;
         section["clash_use_new_field_name"] >> clash_use_new_field_name;
@@ -687,6 +698,8 @@ void readYAMLConf(YAML::Node &node)
         node["advanced"]["max_pending_connections"] >> max_pending_connections;
         node["advanced"]["max_concurrent_threads"] >> max_concurrent_threads;
         node["advanced"]["enable_base_gen"] >> enable_base_gen;
+        node["advanced"]["max_allowed_rulesets"] >> max_allowed_rulesets;
+        node["advanced"]["max_allowed_rules"] >> max_allowed_rules;
         if(node["advanced"]["enable_cache"].IsDefined())
         {
             if(safe_as<bool>(node["advanced"]["enable_cache"]))
@@ -753,6 +766,9 @@ void readConf()
         ini.GetAll("exclude_remarks", def_exclude_remarks);
     if(ini.ItemPrefixExist("include_remarks"))
         ini.GetAll("include_remarks", def_include_remarks);
+    filter_script = ini.GetBool("enable_filter") ? replace_all_distinct(ini.Get("filter_script"), "\\n", "\n") : "";
+    if(startsWith(filter_script, "path:"))
+        filter_script = fileGet(filter_script.substr(5), false);
     ini.GetIfExist("base_path", base_path);
     ini.GetIfExist("clash_rule_base", clash_rule_base);
     ini.GetIfExist("surge_rule_base", surge_rule_base);
@@ -785,6 +801,7 @@ void readConf()
         tfo_flag.set(ini.Get("tcp_fast_open_flag"));
         scv_flag.set(ini.Get("skip_cert_verify_flag"));
         ini.GetBoolIfExist("sort_flag", do_sort);
+        sort_script = replace_all_distinct(ini.Get("sort_script"), "\\n", "\n");
         ini.GetBoolIfExist("filter_deprecated_nodes", filter_deprecated);
         ini.GetBoolIfExist("append_sub_userinfo", append_userinfo);
         ini.GetBoolIfExist("clash_use_new_field_name", clash_use_new_field_name);
@@ -918,6 +935,8 @@ void readConf()
     ini.GetIntIfExist("max_pending_connections", max_pending_connections);
     ini.GetIntIfExist("max_concurrent_threads", max_concurrent_threads);
     ini.GetBoolIfExist("enable_base_gen", enable_base_gen);
+    ini.GetNumberIfExist("max_allowed_rulesets", max_allowed_rulesets);
+    ini.GetNumberIfExist("max_allowed_rules", max_allowed_rules);
     if(ini.ItemExist("enable_cache"))
     {
         if(ini.GetBool("enable_cache"))
@@ -984,7 +1003,7 @@ int loadExternalYAML(YAML::Node &node, ExternalConfig &ext)
     if(section["surge_ruleset"].size())
     {
         readRuleset(section["surge_ruleset"], ext.surge_ruleset, api_mode);
-        if(ext.surge_ruleset.size() > MAX_EXTCONF_RULESET_COUNT)
+        if(max_allowed_rulesets && ext.surge_ruleset.size() > max_allowed_rulesets)
         {
             writeLog(0, "Ruleset count in external config has exceeded limit.", LOG_LEVEL_WARNING);
             eraseElements(ext.surge_ruleset);
@@ -1052,7 +1071,7 @@ int loadExternalConfig(std::string &path, ExternalConfig &ext)
     {
         ini.GetAll("surge_ruleset", ext.surge_ruleset);
         importItems(ext.surge_ruleset, api_mode);
-        if(ext.surge_ruleset.size() > MAX_EXTCONF_RULESET_COUNT)
+        if(max_allowed_rulesets && ext.surge_ruleset.size() > max_allowed_rulesets)
         {
             writeLog(0, "Ruleset count in external config has exceeded limit. ", LOG_LEVEL_WARNING);
             eraseElements(ext.surge_ruleset);
@@ -1163,7 +1182,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     /// switches with default value
     tribool upload = getUrlArg(argument, "upload"), emoji = getUrlArg(argument, "emoji");
     tribool append_type = getUrlArg(argument, "append_type"), tfo = getUrlArg(argument, "tfo"), udp = getUrlArg(argument, "udp"), nodelist = getUrlArg(argument, "list");
-    tribool sort_flag = getUrlArg(argument, "sort");
+    tribool sort_flag = getUrlArg(argument, "sort"), use_sort_script = getUrlArg(argument, "sort_script");
     tribool clash_new_field = getUrlArg(argument, "new_name"), clash_script = getUrlArg(argument, "script"), add_insert = getUrlArg(argument, "insert");
     tribool scv = getUrlArg(argument, "scv"), fdn = getUrlArg(argument, "fdn"), expand = getUrlArg(argument, "expand"), append_sub_userinfo = getUrlArg(argument, "append_info");
     tribool prepend_insert = getUrlArg(argument, "prepend");
@@ -1201,7 +1220,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     {
         pos = x.find("=");
         if(pos == x.npos)
+        {
+            req_arg_map[x] = "";
             continue;
+        }
         if(x.substr(0, pos) == "token")
             continue;
         req_arg_map[x.substr(0, pos)] = x.substr(pos + 1);
@@ -1246,6 +1268,9 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     ext.skip_cert_verify.define(scv_flag);
 
     ext.sort_flag = sort_flag.get(do_sort);
+    use_sort_script.define(sort_script.size());
+    if(ext.sort_flag && use_sort_script)
+        ext.sort_script = sort_script;
     ext.filter_deprecated = fdn.get(filter_deprecated);
     ext.clash_new_field_name = clash_new_field.get(clash_use_new_field_name);
     ext.clash_script = clash_script.get();
@@ -1414,6 +1439,31 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             nodes.emplace(nodes.begin(), x);
         else
             nodes.emplace_back(x);
+    }
+    //run filter script
+    if(filter_script.size())
+    {
+        duk_context *ctx = duktape_init();
+        if(ctx)
+        {
+            defer(duk_destroy_heap(ctx);)
+            if(duktape_peval(ctx, filter_script) == 0)
+            {
+                auto filter = [&](const nodeInfo &x)
+                {
+                    duk_get_global_string(ctx, "filter");
+                    duktape_push_nodeinfo(ctx, x);
+                    duk_pcall(ctx, 1);
+                    return !duktape_get_res_bool(ctx);
+                };
+                nodes.erase(std::remove_if(nodes.begin(), nodes.end(), filter), nodes.end());
+            }
+            else
+            {
+                writeLog(0, "Error when trying to parse script:\n" + duktape_get_err_stack(ctx), LOG_LEVEL_ERROR);
+                duk_pop(ctx); /// pop err
+            }
+        }
     }
 
     //check custom group name
@@ -1662,14 +1712,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 std::string simpleToClashR(RESPONSE_CALLBACK_ARGS)
 {
     std::string url = argument.size() <= 8 ? "" : argument.substr(8);
-    std::string base_content;
-    std::vector<nodeInfo> nodes;
-    string_array extra_group, extra_ruleset, include_remarks, exclude_remarks;
-    std::vector<ruleset_content> rca;
-    std::string subInfo;
-
-    if(!url.size() && !api_mode)
-        url = default_url;
     if(!url.size() || argument.substr(0, 8) != "sublink=")
     {
         *status_code = 400;
@@ -1680,71 +1722,7 @@ std::string simpleToClashR(RESPONSE_CALLBACK_ARGS)
         *status_code = 400;
         return "Please insert your subscription link instead of clicking the default link.";
     }
-    if(insert_url.size())
-        url = insert_url + "|" + url;
-    if(!api_mode || cfw_child_process)
-        readConf();
-
-    extra_group = clash_extra_group;
-
-    if(update_ruleset_on_request || cfw_child_process)
-        refreshRulesets(rulesets, ruleset_content_array);
-    rca = ruleset_content_array;
-
-    extra_settings ext = {true, overwrite_original_rules, safe_get_renames(), safe_get_emojis(), add_emoji, remove_old_emoji, append_proxy_type, false, do_sort, filter_deprecated, clash_use_new_field_name, false, "", "", ""};
-
-    std::string proxy = parseProxy(proxy_subscription);
-
-    include_remarks = def_include_remarks;
-    exclude_remarks = def_exclude_remarks;
-
-    //start parsing urls
-    int groupID = 0;
-    string_array dummy;
-    string_array urls = split(url, "|");
-    for(std::string &x : urls)
-    {
-        x = trim(x);
-        //std::cerr<<"Fetching node data from url '"<<x<<"'."<<std::endl;
-        writeLog(0, "Fetching node data from url '" + x + "'.", LOG_LEVEL_INFO);
-        if(addNodes(x, nodes, groupID, proxy, exclude_remarks, include_remarks, dummy, dummy, subInfo, false) == -1)
-        {
-            *status_code = 400;
-            return std::string("The following link doesn't contain any valid node info: " + x);
-        }
-        groupID++;
-    }
-    //exit if found nothing
-    if(!nodes.size())
-    {
-        *status_code = 400;
-        return "No nodes were found!";
-    }
-
-    writeLog(0, "Generate target: ClashR", LOG_LEVEL_INFO);
-
-    template_args tpl_args;
-    tpl_args.global_vars = global_vars;
-    tpl_args.local_vars["clash.new_field_name"] = clash_use_new_field_name ? "true" : "false";
-    tpl_args.request_params["target"] = "clashr";
-    tpl_args.request_params["url"] = url;
-
-    if(!enable_base_gen)
-    {
-        if(render_template(fetchFile(clash_rule_base, proxy, cache_config), tpl_args, base_content, template_path) != 0)
-        {
-            *status_code = 400;
-            return base_content;
-        }
-        //base_content = fetchFile(clash_rule_base, proxy, cache_config);
-        return netchToClash(nodes, base_content, rca, extra_group, true, ext);
-    }
-    else
-    {
-        YAML::Node yamlnode = safe_get_clash_base();
-        netchToClash(nodes, yamlnode, extra_group, true, ext);
-        return YAML::Dump(yamlnode);
-    }
+    return subconverter("target=clashr&url=" + UrlEncode(url), postdata, status_code, extra_headers);
 }
 
 std::string surgeConfToClash(RESPONSE_CALLBACK_ARGS)
@@ -2358,8 +2336,9 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS)
     {
         pos = x.find("=");
         if(pos == x.npos)
-            continue;
-        req_arg_map[x.substr(0, pos)] = x.substr(pos + 1);
+            req_arg_map[x] = "";
+        else
+            req_arg_map[x.substr(0, pos)] = x.substr(pos + 1);
     }
     tpl_args.request_params = req_arg_map;
 
