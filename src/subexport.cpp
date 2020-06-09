@@ -1,3 +1,13 @@
+#include <algorithm>
+#include <iostream>
+#include <numeric>
+#include <cmath>
+#include <climits>
+#include <rapidjson/writer.h>
+#include <rapidjson/document.h>
+#include <yaml-cpp/yaml.h>
+#include <duktape.h>
+
 #include "misc.h"
 #include "speedtestutil.h"
 #include "ini_reader.h"
@@ -11,16 +21,7 @@
 #include "logger.h"
 #include "templates.h"
 #include "script_duktape.h"
-
-#include <algorithm>
-#include <iostream>
-#include <numeric>
-#include <cmath>
-#include <climits>
-#include <rapidjson/writer.h>
-#include <rapidjson/document.h>
-#include <yaml-cpp/yaml.h>
-#include <duktape.h>
+#include "yamlcpp_extra.h"
 
 extern bool api_mode;
 extern string_array ss_ciphers, ssr_ciphers;
@@ -36,13 +37,6 @@ const string_array surge2_rule_type = {basic_types, "IP-CIDR6", "USER-AGENT", "U
 const string_array surge_rule_type = {basic_types, "IP-CIDR6", "USER-AGENT", "URL-REGEX", "AND", "OR", "NOT", "PROCESS-NAME", "IN-PORT", "DEST-PORT", "SRC-IP"};
 const string_array quanx_rule_type = {basic_types, "USER-AGENT", "HOST", "HOST-SUFFIX", "HOST-KEYWORD"};
 const string_array surfb_rule_type = {basic_types, "IP-CIDR6", "PROCESS-NAME", "IN-PORT", "DEST-PORT", "SRC-IP"};
-
-template <typename T> T safe_as (const YAML::Node& node)
-{
-    if(node.IsDefined() && !node.IsNull())
-        return node.as<T>();
-    return T();
-};
 
 std::string hostnameToIPAddr(const std::string &host)
 {
@@ -1010,29 +1004,41 @@ void preprocessNodes(std::vector<nodeInfo> &nodes, extra_settings &ext)
         bool failed = true;
         if(ext.sort_script.size())
         {
-            duk_context *ctx = duktape_init();
-            if(ctx)
+            try
             {
-                defer(duk_destroy_heap(ctx);)
-                if(duktape_peval(ctx, ext.sort_script) == 0)
+                duk_context *ctx = duktape_init();
+                if(ctx)
                 {
-                    auto comparer = [&](const nodeInfo &a, const nodeInfo &b)
+                    defer(duk_destroy_heap(ctx);)
+                    if(duktape_peval(ctx, ext.sort_script) == 0)
                     {
-                        duk_get_global_string(ctx, "compare");
-                        /// push 2 nodeinfo
-                        duktape_push_nodeinfo(ctx, a);
-                        duktape_push_nodeinfo(ctx, b);
-                        /// call function
-                        return duktape_get_res_int(ctx);
-                    };
-                    std::sort(nodes.begin(), nodes.end(), comparer);
-                    failed = false;
+                        auto comparer = [&](const nodeInfo &a, const nodeInfo &b)
+                        {
+                            if(a.linkType < 1 || a.linkType > 5)
+                                return 1;
+                            if(b.linkType < 1 || b.linkType > 5)
+                                return 0;
+                            duk_get_global_string(ctx, "compare");
+                            /// push 2 nodeinfo
+                            duktape_push_nodeinfo(ctx, a);
+                            duktape_push_nodeinfo(ctx, b);
+                            /// call function
+                            duk_pcall(ctx, 2);
+                            return duktape_get_res_int(ctx);
+                        };
+                        std::sort(nodes.begin(), nodes.end(), comparer);
+                        failed = false;
+                    }
+                    else
+                    {
+                        writeLog(0, "Error when trying to parse script:\n" + duktape_get_err_stack(ctx), LOG_LEVEL_ERROR);
+                        duk_pop(ctx); /// pop err
+                    }
                 }
-                else
-                {
-                    writeLog(0, "Error when trying to parse script:\n" + duktape_get_err_stack(ctx), LOG_LEVEL_ERROR);
-                    duk_pop(ctx); /// pop err
-                }
+            }
+            catch (std::exception&)
+            {
+                //failed
             }
         }
         if(failed) std::sort(nodes.begin(), nodes.end(), [](const nodeInfo &a, const nodeInfo &b)
@@ -1183,19 +1189,27 @@ void netchToClash(std::vector<nodeInfo> &nodes, YAML::Node &yamlnode, string_arr
             break;
         case SPEEDTEST_MESSAGE_FOUNDSOCKS:
             singleproxy["type"] = "socks5";
-            singleproxy["username"] = username;
-            singleproxy["password"] = password;
-            if(std::all_of(password.begin(), password.end(), ::isdigit) && !password.empty())
-                singleproxy["password"].SetTag("str");
+            if(!username.empty())
+                singleproxy["username"] = username;
+            if(!password.empty())
+            {
+                singleproxy["password"] = password;
+                if(std::all_of(password.begin(), password.end(), ::isdigit))
+                    singleproxy["password"].SetTag("str");
+            }
             if(scv)
                 singleproxy["skip-cert-verify"] = true;
             break;
         case SPEEDTEST_MESSAGE_FOUNDHTTP:
             singleproxy["type"] = "http";
-            singleproxy["username"] = username;
-            singleproxy["password"] = password;
-            if(std::all_of(password.begin(), password.end(), ::isdigit) && !password.empty())
-                singleproxy["password"].SetTag("str");
+            if(!username.empty())
+                singleproxy["username"] = username;
+            if(!password.empty())
+            {
+                singleproxy["password"] = password;
+                if(std::all_of(password.begin(), password.end(), ::isdigit))
+                    singleproxy["password"].SetTag("str");
+            }
             singleproxy["tls"] = type == "HTTPS";
             if(scv)
                 singleproxy["skip-cert-verify"] = true;
@@ -1347,7 +1361,7 @@ std::string netchToClash(std::vector<nodeInfo> &nodes, std::string &base_conf, s
     {
         if(yamlnode["mode"].IsDefined())
             yamlnode["mode"] = ext.clash_script ? "Script" : "Rule";
-        renderClashScript(yamlnode, ruleset_content_array, ext.managed_config_prefix, ext.clash_script, ext.overwrite_original_rules);
+        renderClashScript(yamlnode, ruleset_content_array, ext.managed_config_prefix, ext.clash_script, ext.overwrite_original_rules, ext.clash_classical_ruleset);
         return YAML::Dump(yamlnode);
     }
 
